@@ -1,0 +1,1200 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Ember Flap - Free HTML5 Game</title>
+<meta name="description" content="Play Ember Flap - Tap to flap a shrinking ember bird through volcanic vents before it fades to ash.">
+<meta name="keywords" content="ember chain, hyper casual game, browser game, tap game, fire game, free online game">
+<meta name="theme-color" content="#ff4500">
+<!-- Open Graph -->
+<meta property="og:title" content="Ember Chain">
+<meta property="og:description" content="Snap. Chain. Surge. A fast-tap fire game that fits in your browser.">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://balinti.github.io/ember-flap/">
+<meta property="og:image" content="https://balinti.github.io/ember-flap/og.png">
+<!-- Twitter Card -->
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Ember Chain">
+<meta name="twitter:description" content="Snap. Chain. Surge. A fast-tap fire game that fits in your browser.">
+<!-- AdSense -->
+<script async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-pub-4099346100621490" crossorigin="anonymous"></script>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body {
+    width: 100%; height: 100%;
+    background: #0a0005;
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: flex-start;
+    overflow: hidden;
+    font-family: 'Segoe UI', system-ui, sans-serif;
+  }
+  #game-wrap {
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: flex-start;
+    width: 100%; max-width: 420px;
+    height: 100vh;
+  }
+  #gameCanvas {
+    display: block;
+    width: 100%;
+    flex: 1;
+    min-height: 0;
+    touch-action: none;
+    cursor: pointer;
+  }
+  #ad-container {
+    width: 100%; max-width: 420px;
+    min-height: 90px;
+    background: #110008;
+    display: flex; align-items: center; justify-content: center;
+    flex-shrink: 0;
+  }
+</style>
+</head>
+<body>
+<div id="game-wrap">
+  <canvas id="gameCanvas"></canvas>
+</div>
+<div id="ad-container">
+  <ins class="adsbygoogle"
+    style="display:block;width:100%;min-height:90px"
+    data-ad-client="ca-pub-4099346100621490"
+    data-ad-slot="auto"
+    data-ad-format="auto"
+    data-full-width-responsive="true"></ins>
+  <script>(adsbygoogle = window.adsbygoogle || []).push({});</script>
+</div>
+<script>
+(function() {
+'use strict';
+
+// ─── Canvas Setup ──────────────────────────────────────────────────────────
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+let W = 420, H = 700, DPR = 1;
+
+function resizeCanvas() {
+  const wrap = document.getElementById('game-wrap');
+  const adH = document.getElementById('ad-container').offsetHeight || 90;
+  const availH = window.innerHeight - adH;
+  const availW = Math.min(window.innerWidth, 420);
+  const aspect = 420 / 700;
+  let cW = availW, cH = availW / aspect;
+  if (cH > availH) { cH = availH; cW = cH * aspect; }
+  DPR = window.devicePixelRatio || 1;
+  canvas.width = Math.floor(cW * DPR);
+  canvas.height = Math.floor(cH * DPR);
+  canvas.style.width = cW + 'px';
+  canvas.style.height = cH + 'px';
+  W = 420; H = Math.round(700 * cH / cW);
+  ctx.setTransform(canvas.width / W, 0, 0, canvas.height / H, 0, 0);
+}
+window.addEventListener('resize', resizeCanvas);
+resizeCanvas();
+
+// ─── Challenge Param ───────────────────────────────────────────────────────
+const urlParams = new URLSearchParams(location.search);
+const challengeScore = parseInt(urlParams.get('challenge')) || 0;
+
+// ─── State ─────────────────────────────────────────────────────────────────
+let state = 'start'; // 'start' | 'playing' | 'gameover'
+let score = 0;
+let bestScore = parseInt(localStorage.getItem('emberChain_best') || '0');
+let frame = 0;
+let autoRetryTimer = 0;
+
+// ─── Difficulty ────────────────────────────────────────────────────────────
+function getDiff(s) {
+  if (s < 25)  return { maxVents:3, speed:80,  hotWindow:1.0, coldRatio:0,   shrink:0.6,  lava:false };
+  if (s < 60)  return { maxVents:5, speed:110, hotWindow:0.8, coldRatio:0.125,shrink:0.85, lava:true,  gapMult:1.6 };
+  if (s < 120) return { maxVents:6, speed:140, hotWindow:0.75,coldRatio:0.2, shrink:1.1,  lava:true,  gapMult:1.3 };
+  if (s < 200) return { maxVents:6, speed:160, hotWindow:0.55,coldRatio:0.3, shrink:1.4,  lava:true,  gapMult:1.1 };
+  return         { maxVents:7, speed:80+Math.random()*100, hotWindow:0.4, coldRatio:0.4, shrink:1.8, lava:true, gapMult:1.0 };
+}
+
+// ─── Ember ─────────────────────────────────────────────────────────────────
+const ember = {
+  x: 100, y: H / 2,
+  size: 18, targetSize: 18,
+  surgeChain: 0,
+  surgeActive: false, surgeTimer: 0,
+  snapFlash: 0,     // frames of white flash after snap
+  coldFlash: 0,     // frames of cold-blue flash
+  chromaTime: 0,    // chromatic aberration
+  crunchT: 0,       // crunch scale animation
+  trail: [],        // fire trail in SURGE mode
+  ashParticles: [],
+  init() {
+    this.x = 80; this.y = H / 2;
+    this.size = 18; this.targetSize = 18;
+    this.surgeChain = 0; this.surgeActive = false; this.surgeTimer = 0;
+    this.snapFlash = 0; this.coldFlash = 0; this.chromaTime = 0; this.crunchT = 0;
+    this.trail = []; this.ashParticles = [];
+    // gentle path drift
+    this.pathY = H / 2; this.pathV = 0;
+  },
+  update(dt, diff) {
+    // gentle vertical drift
+    this.pathV += (Math.sin(frame * 0.018) * 40 - this.pathV) * 0.03;
+    this.pathY = Math.max(40, Math.min(H - 40, this.pathY + this.pathV * dt));
+    this.y += (this.pathY - this.y) * 0.06;
+
+    // size lerp
+    this.size += (this.targetSize - this.size) * 0.18;
+
+    // passive shrink
+    this.targetSize -= diff.shrink * dt;
+    this.targetSize = Math.max(4, this.targetSize);
+
+    // surge
+    if (this.surgeActive) {
+      this.surgeTimer -= dt;
+      if (this.surgeTimer <= 0) { this.surgeActive = false; this.surgeChain = 0; }
+    }
+
+    // flash timers
+    if (this.snapFlash > 0) this.snapFlash--;
+    if (this.coldFlash > 0) this.coldFlash--;
+    if (this.chromaTime > 0) this.chromaTime -= dt;
+    if (this.crunchT > 0) this.crunchT -= dt;
+
+    // SURGE trail
+    if (this.surgeActive) {
+      this.trail.push({ x: this.x, y: this.y, life: 0.5, maxLife: 0.5, r: this.size });
+    }
+    for (let i = this.trail.length - 1; i >= 0; i--) {
+      this.trail[i].life -= dt;
+      if (this.trail[i].life <= 0) this.trail.splice(i, 1);
+    }
+  }
+};
+
+// ─── Vents ─────────────────────────────────────────────────────────────────
+let vents = [];
+let ventSpawnTimer = 0;
+
+function spawnVent(diff) {
+  const cold = Math.random() < diff.coldRatio;
+  const arcDir = Math.random() < 0.5 ? 1 : -1;
+  const startY = H * 0.15 + Math.random() * H * 0.7;
+  const arcAmt = (20 + Math.random() * 60) * arcDir;
+  vents.push({
+    x: W + 20,
+    y: startY,
+    baseY: startY,
+    arcAmt,
+    cold,
+    // hot window: age when it opens, how long it stays
+    hotOpen: 0.15 + Math.random() * 0.3,  // fraction of travel when hot opens
+    hotDur: diff.hotWindow,
+    speed: diff.speed * (0.8 + Math.random() * 0.4),
+    radius: 14 + Math.random() * 6,
+    age: 0,
+    totalLife: (W + 40) / diff.speed * 1.2,
+    absorbed: false,
+    missed: false,
+    // visual
+    hue: cold ? 200 + Math.random() * 40 : 20 + Math.random() * 20,
+    pulse: Math.random() * Math.PI * 2,
+    // blink-mimic for high scores (score >= 120)
+    mimicBlink: !cold && score >= 120 && Math.random() < 0.3,
+    blinkState: false, blinkTimer: 0,
+    // near-miss ring
+    nearMissRing: 0,
+    // daughter spawn
+    isDaughter: false,
+  });
+}
+
+function getVentIsHot(v) {
+  if (v.cold) return false;
+  if (v.absorbed || v.missed) return false;
+  const progress = v.age / v.totalLife;
+  return progress >= v.hotOpen && v.age - v.hotOpen * v.totalLife < v.hotDur * (v.speed / 140);
+}
+
+function updateVents(dt, diff) {
+  ventSpawnTimer -= dt;
+  if (ventSpawnTimer <= 0 && vents.filter(v => !v.absorbed).length < diff.maxVents) {
+    ventSpawnTimer = 0.4 + Math.random() * 0.8;
+    spawnVent(diff);
+
+    // dual vent pairs at score 60+
+    if (score >= 60 && Math.random() < 0.25) {
+      setTimeout(() => { if (state === 'playing') spawnVent(diff); }, 250);
+    }
+  }
+
+  for (let i = vents.length - 1; i >= 0; i--) {
+    const v = vents[i];
+    v.age += dt;
+    v.x -= v.speed * dt;
+    v.y = v.baseY + Math.sin(v.age * 1.2) * v.arcAmt;
+    v.pulse += dt * 5;
+
+    // blink mimic
+    if (v.mimicBlink) {
+      v.blinkTimer -= dt;
+      if (v.blinkTimer <= 0) {
+        v.blinkState = !v.blinkState;
+        v.blinkTimer = 0.15;
+      }
+    }
+
+    // near-miss ring decay
+    if (v.nearMissRing > 0) v.nearMissRing -= dt;
+
+    // check if hot window expired
+    const progress = v.age / v.totalLife;
+    if (!v.cold && !v.absorbed && !v.missed) {
+      const hotEnd = v.hotOpen + v.hotDur * (v.speed / 140) / v.totalLife;
+      if (progress > hotEnd) v.missed = true;
+    }
+
+    // auto-absorb in SURGE mode
+    if (ember.surgeActive && !v.absorbed && !v.cold) {
+      const dx = v.x - ember.x, dy = v.y - ember.y;
+      if (Math.sqrt(dx*dx + dy*dy) < ember.size + v.radius + 30) {
+        absorbVent(v, true);
+      }
+    }
+
+    // remove off-screen
+    if (v.x < -30 || v.age > v.totalLife * 1.5) {
+      vents.splice(i, 1);
+    }
+  }
+}
+
+// ─── Lava Gates ────────────────────────────────────────────────────────────
+let lavaGates = [];
+let gateSpawnTimer = 8;
+
+function spawnGate(diff) {
+  const minSize = 8;
+  const gapH = Math.max(minSize * 2 + 8, ember.size * 2 * diff.gapMult);
+  const gapCenter = H * 0.2 + Math.random() * H * 0.6;
+  lavaGates.push({
+    x: W + 10,
+    gapCenter,
+    gapH,
+    speed: diff.speed * 0.7,
+    passed: false,
+    smashing: false,
+    smashTimer: 0,
+  });
+}
+
+function updateGates(dt, diff) {
+  if (!diff.lava) return;
+  gateSpawnTimer -= dt;
+  if (gateSpawnTimer <= 0) {
+    gateSpawnTimer = 4 + Math.random() * 4;
+    spawnGate(diff);
+  }
+  for (let i = lavaGates.length - 1; i >= 0; i--) {
+    const g = lavaGates[i];
+    g.x -= g.speed * dt;
+    if (g.smashTimer > 0) g.smashTimer -= dt;
+    if (g.x < -20) lavaGates.splice(i, 1);
+  }
+}
+
+// ─── Particles ─────────────────────────────────────────────────────────────
+let particles = [];
+
+function spawnSnapBurst(x, y, hue) {
+  // 24 radial fire particles
+  for (let i = 0; i < 24; i++) {
+    const ang = (i / 24) * Math.PI * 2;
+    const spd = 60 + Math.random() * 80;
+    particles.push({
+      x, y,
+      vx: Math.cos(ang) * spd, vy: Math.sin(ang) * spd,
+      life: 0.3 + Math.random() * 0.2, maxLife: 0.5,
+      r: 2 + Math.random() * 3,
+      hue: hue + (Math.random() - 0.5) * 30,
+      type: 'fire'
+    });
+  }
+  // shockwave ring
+  particles.push({ x, y, life: 0.3, maxLife: 0.3, r: 5, maxR: 40, type: 'ring', hue });
+}
+
+function spawnLavaSmash(x, y) {
+  for (let i = 0; i < 40; i++) {
+    const ang = Math.random() * Math.PI * 2;
+    const spd = 40 + Math.random() * 120;
+    particles.push({
+      x, y,
+      vx: Math.cos(ang) * spd, vy: Math.sin(ang) * spd - 30,
+      life: 0.4 + Math.random() * 0.4, maxLife: 0.8,
+      r: 3 + Math.random() * 5,
+      hue: 15 + Math.random() * 30,
+      type: 'lava'
+    });
+  }
+  // screen shake
+  shakeAmt = 4; shakeDur = 0.2;
+  // text popup
+  floatTexts.push({ x, y: y - 20, text: '+SMASH', life: 1.0, maxLife: 1.0, color: '#ff7700', size: 16 });
+}
+
+function spawnAshDeath(x, y) {
+  for (let i = 0; i < 32; i++) {
+    const ang = -Math.PI/2 + (Math.random() - 0.5) * Math.PI;
+    const spd = 20 + Math.random() * 50;
+    particles.push({
+      x: x + (Math.random() - 0.5) * 20,
+      y: y + (Math.random() - 0.5) * 20,
+      vx: Math.cos(ang) * spd * 0.3, vy: Math.sin(ang) * spd - 20,
+      life: 1.0 + Math.random() * 0.5, maxLife: 1.5,
+      r: 2 + Math.random() * 4,
+      type: 'ash', hue: 0
+    });
+  }
+}
+
+function updateParticles(dt) {
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const p = particles[i];
+    p.life -= dt;
+    if (p.life <= 0) { particles.splice(i, 1); continue; }
+    if (p.type !== 'ring') {
+      p.x += p.vx * dt; p.y += p.vy * dt;
+      if (p.type === 'fire') p.vy += 40 * dt;
+      if (p.type === 'lava') p.vy += 80 * dt;
+      if (p.type === 'ash') { p.vx *= 0.98; p.vy += 10 * dt; }
+    }
+  }
+}
+
+// ─── Float Texts ───────────────────────────────────────────────────────────
+let floatTexts = [];
+function updateFloatTexts(dt) {
+  for (let i = floatTexts.length - 1; i >= 0; i--) {
+    const t = floatTexts[i];
+    t.life -= dt; t.y -= 25 * dt;
+    if (t.life <= 0) floatTexts.splice(i, 1);
+  }
+}
+
+// ─── Screen Shake ──────────────────────────────────────────────────────────
+let shakeAmt = 0, shakeDur = 0, shakeX = 0, shakeY = 0;
+function updateShake(dt) {
+  if (shakeDur > 0) {
+    shakeDur -= dt;
+    shakeX = (Math.random() - 0.5) * shakeAmt * 2;
+    shakeY = (Math.random() - 0.5) * shakeAmt * 2;
+    if (shakeDur <= 0) { shakeX = 0; shakeY = 0; }
+  }
+}
+
+// ─── Milestone Banners ─────────────────────────────────────────────────────
+const milestones = [
+  { score: 25,  text: 'RHYTHM ZONE',  color: '#ffaa00' },
+  { score: 60,  text: 'SKILL ZONE',   color: '#ff6600' },
+  { score: 120, text: 'MASTERY ZONE', color: '#ff3300' },
+  { score: 200, text: 'CHAOS ZONE',   color: '#ff0044' },
+];
+let milestoneReached = new Set();
+let bannerText = '', bannerColor = '', bannerLife = 0;
+
+function checkMilestones() {
+  for (const m of milestones) {
+    if (score >= m.score && !milestoneReached.has(m.score)) {
+      milestoneReached.add(m.score);
+      bannerText = m.text; bannerColor = m.color; bannerLife = 1.5;
+    }
+  }
+}
+
+// ─── Background Parallax ───────────────────────────────────────────────────
+let bgScroll = [0, 0, 0];
+const bgSpeeds = [20, 40, 70];
+
+function getBgColor() {
+  if (score < 60)  return { top: '#1a0008', bot: '#2d0010' };
+  if (score < 120) return { top: '#200005', bot: '#3a0008' };
+  if (score < 200) return { top: '#280002', bot: '#450003' };
+  // near-black deepening
+  const t = Math.min(1, (score - 200) / 100);
+  const r = Math.round(40 - t * 30);
+  const g = 0;
+  const b = Math.round(2 - t * 2);
+  return { top: `rgb(${r},${g},${b})`, bot: `rgb(${Math.round(r*0.5)},0,0)` };
+}
+
+function drawBackground(dt) {
+  const { top, bot } = getBgColor();
+  const grad = ctx.createLinearGradient(0, 0, 0, H);
+  grad.addColorStop(0, top); grad.addColorStop(1, bot);
+  ctx.fillStyle = grad; ctx.fillRect(0, 0, W, H);
+
+  // parallax lava columns
+  for (let layer = 0; layer < 3; layer++) {
+    bgScroll[layer] = (bgScroll[layer] + bgSpeeds[layer] * dt) % 80;
+    ctx.globalAlpha = 0.06 + layer * 0.03;
+    const hue = ember.surgeActive ? 30 : 0;
+    for (let x = -80 + bgScroll[layer] % 80; x < W + 80; x += 70 + layer * 10) {
+      const colGrad = ctx.createLinearGradient(x, 0, x + 30, H);
+      colGrad.addColorStop(0, `hsla(${hue + layer*5},90%,50%,0)`);
+      colGrad.addColorStop(0.3 + layer * 0.1, `hsla(${hue + layer*5},90%,40%,1)`);
+      colGrad.addColorStop(1, `hsla(${hue + layer*5},90%,30%,0)`);
+      ctx.fillStyle = colGrad;
+      ctx.fillRect(x, 0, 25 + layer * 5, H);
+    }
+  }
+  ctx.globalAlpha = 1;
+
+  // SURGE background heartbeat pulse
+  if (ember.surgeActive) {
+    const beat = 0.5 + 0.5 * Math.sin(frame * 0.25);
+    ctx.globalAlpha = beat * 0.12;
+    ctx.fillStyle = '#ff6600';
+    ctx.fillRect(0, 0, W, H);
+    ctx.globalAlpha = 1;
+  }
+}
+
+// ─── Score Multiplier ──────────────────────────────────────────────────────
+function getMultiplier() {
+  const sizeRatio = ember.size / 18;
+  let cap = Math.round(2 + sizeRatio * 4); // 2..6
+  cap = Math.min(6, Math.max(1, cap));
+  let chain = ember.surgeChain;
+  if (ember.surgeActive) return cap * 3;
+  return Math.min(cap, 1 + Math.floor(chain / 2));
+}
+
+// ─── Absorb Vent ──────────────────────────────────────────────────────────
+function absorbVent(v, autoSurge) {
+  v.absorbed = true;
+  score += getMultiplier();
+  ember.targetSize = Math.min(28, ember.targetSize + 3);
+  ember.snapFlash = 3;
+  ember.surgeChain++;
+
+  spawnSnapBurst(v.x, v.y, v.hue);
+
+  if (ember.surgeChain >= 5 && !ember.surgeActive) {
+    ember.surgeActive = true;
+    ember.surgeTimer = score >= 120 ? 3.5 : 4.0;
+    floatTexts.push({ x: ember.x, y: ember.y - 30, text: 'SURGE!', life: 1.2, maxLife: 1.2, color: '#ffffff', size: 22 });
+    shakeAmt = 3; shakeDur = 0.3;
+  }
+
+  // split vent at score >= 120
+  if (score >= 120 && !v.isDaughter && Math.random() < 0.3) {
+    setTimeout(() => {
+      if (state === 'playing') {
+        const diff = getDiff(score);
+        for (let d = 0; d < 2; d++) {
+          const dv = spawnDaughter(v);
+          vents.push(dv);
+        }
+      }
+    }, 100);
+  }
+
+  checkMilestones();
+}
+
+function spawnDaughter(parent) {
+  const diff = getDiff(score);
+  return {
+    x: parent.x + (Math.random() - 0.5) * 30,
+    y: parent.y + (d => d ? -25 : 25)(Math.random() < 0.5),
+    baseY: parent.y,
+    arcAmt: (Math.random() - 0.5) * 40,
+    cold: false,
+    hotOpen: 0,
+    hotDur: diff.hotWindow * 0.7,
+    speed: diff.speed * (0.9 + Math.random() * 0.2),
+    radius: 10,
+    age: 0,
+    totalLife: (parent.x + 40) / diff.speed,
+    absorbed: false, missed: false,
+    hue: parent.hue,
+    pulse: Math.random() * Math.PI * 2,
+    mimicBlink: false, blinkState: false, blinkTimer: 0,
+    nearMissRing: 0, isDaughter: true
+  };
+}
+
+// ─── Tap Handler ───────────────────────────────────────────────────────────
+function handleTap() {
+  if (state === 'start') { startGame(); return; }
+  if (state === 'gameover') { startGame(); return; }
+  if (state !== 'playing') return;
+
+  // find nearest hot vent within snap range
+  let best = null, bestDist = Infinity;
+  for (const v of vents) {
+    if (v.absorbed) continue;
+    const dx = v.x - ember.x, dy = v.y - ember.y;
+    const dist = Math.sqrt(dx*dx + dy*dy);
+    const hot = getVentIsHot(v);
+    if (hot && dist < best ? bestDist : Infinity) {
+      // check distance reasonable
+      if (dist < 120) { best = v; bestDist = dist; }
+    }
+    if (hot && dist < 120 && dist < bestDist) { best = v; bestDist = dist; }
+  }
+
+  if (best) {
+    absorbVent(best, false);
+    // near-miss check: was it edge of window?
+    const progress = best.age / best.totalLife;
+    const hotEnd = best.hotOpen + best.hotDur * (best.speed / 140) / best.totalLife;
+    if (hotEnd - progress < 0.05) {
+      best.nearMissRing = 0.4;
+      shakeAmt = 1.5; shakeDur = 0.1;
+    }
+  } else {
+    // mis-tap on cold vent?
+    let coldHit = null, coldDist = Infinity;
+    for (const v of vents) {
+      if (v.absorbed) continue;
+      const dx = v.x - ember.x, dy = v.y - ember.y;
+      const dist = Math.sqrt(dx*dx + dy*dy);
+      if (v.cold && dist < 80 && dist < coldDist) { coldHit = v; coldDist = dist; }
+    }
+    if (coldHit) {
+      coldHit.absorbed = true;
+      ember.targetSize -= 5;
+      ember.coldFlash = 4;
+      ember.chromaTime = 0.2;
+      ember.crunchT = 0.25;
+      ember.surgeChain = Math.max(0, ember.surgeChain - 2);
+      shakeAmt = 2; shakeDur = 0.15;
+    } else {
+      // just broke chain
+      ember.surgeChain = Math.max(0, ember.surgeChain - 1);
+    }
+  }
+
+  if (ember.targetSize <= 4) triggerDeath();
+}
+
+canvas.addEventListener('pointerdown', handleTap);
+document.addEventListener('keydown', e => {
+  if (e.code === 'Space' || e.code === 'Enter') { e.preventDefault(); handleTap(); }
+});
+
+// ─── Gate Collision ────────────────────────────────────────────────────────
+function checkGates() {
+  const e = ember;
+  for (const g of lavaGates) {
+    if (g.passed || g.smashing) continue;
+    // check if ember overlaps gate x range
+    if (g.x < e.x + e.size && g.x + 8 > e.x - e.size) {
+      const topWall = g.gapCenter - g.gapH / 2;
+      const botWall = g.gapCenter + g.gapH / 2;
+      const inGap = e.y + e.size > topWall && e.y - e.size < botWall;
+      if (inGap) {
+        // can smash?
+        if (e.size >= g.gapH / 2 - 2 || e.surgeActive) {
+          // smash through
+          g.smashing = true; g.smashTimer = 0.3; g.passed = true;
+          spawnLavaSmash(g.x + 4, g.gapCenter);
+          score += 3 * getMultiplier();
+        } else {
+          g.passed = true; // pass through gap, no penalty
+        }
+      } else {
+        // hit wall!
+        if (!e.surgeActive) {
+          // penalize or kill
+          if (e.size > 10) {
+            e.targetSize -= 6;
+            g.passed = true;
+            shakeAmt = 5; shakeDur = 0.25;
+          } else {
+            g.passed = true;
+            triggerDeath();
+          }
+        } else {
+          g.smashing = true; g.smashTimer = 0.3; g.passed = true;
+          spawnLavaSmash(g.x + 4, e.y);
+        }
+      }
+    }
+  }
+}
+
+// ─── Death ─────────────────────────────────────────────────────────────────
+function triggerDeath() {
+  if (state !== 'playing') return;
+  state = 'gameover';
+  spawnAshDeath(ember.x, ember.y);
+  shakeAmt = 8; shakeDur = 0.4;
+  if (score > bestScore) {
+    bestScore = score;
+    localStorage.setItem('emberChain_best', bestScore);
+  }
+  autoRetryTimer = 8;
+  // animated score
+  displayScore = 0; scoreAnimTarget = score;
+}
+
+// ─── Game Start / Reset ───────────────────────────────────────────────────
+function startGame() {
+  state = 'playing';
+  score = 0; frame = 0;
+  vents = []; lavaGates = []; particles = []; floatTexts = [];
+  ventSpawnTimer = 1; gateSpawnTimer = 8;
+  milestoneReached.clear();
+  bannerLife = 0; bannerText = '';
+  shakeAmt = 0; shakeDur = 0; shakeX = 0; shakeY = 0;
+  ember.init();
+}
+
+// ─── Draw Vent ─────────────────────────────────────────────────────────────
+function drawVent(v) {
+  const hot = getVentIsHot(v);
+  const pulseFactor = 0.15 * Math.sin(v.pulse);
+
+  let outerColor, coreColor, glowColor;
+  if (v.cold) {
+    outerColor = `hsl(210,60%,40%)`;
+    coreColor = `hsl(200,70%,65%)`;
+    glowColor = `hsla(205,80%,60%,0.3)`;
+  } else if (v.mimicBlink && v.blinkState) {
+    // blink cold camouflage
+    outerColor = `hsl(210,60%,35%)`;
+    coreColor = `hsl(200,70%,55%)`;
+    glowColor = `hsla(205,60%,50%,0.2)`;
+  } else if (hot) {
+    outerColor = `hsl(${v.hue},100%,55%)`;
+    coreColor = `#ffffff`;
+    glowColor = `hsla(${v.hue},100%,60%,0.5)`;
+  } else if (v.missed) {
+    outerColor = `hsl(210,50%,30%)`;
+    coreColor = `hsl(205,60%,50%)`;
+    glowColor = `hsla(205,60%,40%,0.15)`;
+  } else {
+    // warming up
+    const prog = Math.max(0, (v.age / v.totalLife - v.hotOpen * 0.5) / (v.hotOpen * 0.5));
+    outerColor = `hsl(${v.hue * (1-prog) + 20*prog},${60+40*prog}%,${35+20*prog}%)`;
+    coreColor = `hsl(${30 + v.hue*(1-prog)},90%,${45+30*prog}%)`;
+    glowColor = `hsla(${v.hue},80%,50%,${0.1 + 0.3*prog})`;
+  }
+
+  const r = v.radius * (1 + pulseFactor);
+  // SURGE comet streaks
+  if (ember.surgeActive && hot) {
+    ctx.save();
+    const len = 40 + r * 2;
+    const streakGrad = ctx.createLinearGradient(v.x + len, v.y, v.x - r, v.y);
+    streakGrad.addColorStop(0, `hsla(${v.hue},100%,60%,0)`);
+    streakGrad.addColorStop(1, `hsla(${v.hue},100%,60%,0.7)`);
+    ctx.fillStyle = streakGrad;
+    ctx.beginPath();
+    ctx.ellipse(v.x + len/2 - r, v.y, len/2, r * 0.4, 0, 0, Math.PI*2);
+    ctx.fill();
+    ctx.restore();
+  }
+
+  // glow
+  ctx.save();
+  const glowR = hot ? r * 2.5 : r * 1.5;
+  const glowGrad = ctx.createRadialGradient(v.x, v.y, 0, v.x, v.y, glowR);
+  glowGrad.addColorStop(0, glowColor);
+  glowGrad.addColorStop(1, 'transparent');
+  ctx.fillStyle = glowGrad; ctx.beginPath(); ctx.arc(v.x, v.y, glowR, 0, Math.PI*2); ctx.fill();
+  ctx.restore();
+
+  // body
+  const bodyGrad = ctx.createRadialGradient(v.x, v.y, 0, v.x, v.y, r);
+  bodyGrad.addColorStop(0, coreColor);
+  bodyGrad.addColorStop(0.5, outerColor);
+  bodyGrad.addColorStop(1, 'transparent');
+  ctx.fillStyle = bodyGrad; ctx.beginPath(); ctx.arc(v.x, v.y, r, 0, Math.PI*2); ctx.fill();
+
+  // near-miss ring
+  if (v.nearMissRing > 0) {
+    const rings = 3;
+    for (let ri = 0; ri < rings; ri++) {
+      const t = 1 - v.nearMissRing / 0.4;
+      const ringR = r + (t + ri * 0.15) * 40;
+      ctx.save();
+      ctx.globalAlpha = Math.max(0, (1 - t) * (1 - ri * 0.3));
+      ctx.strokeStyle = '#ffd700';
+      ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(v.x, v.y, ringR, 0, Math.PI*2); ctx.stroke();
+      ctx.restore();
+    }
+  }
+}
+
+// ─── Draw Ember ────────────────────────────────────────────────────────────
+function drawEmber(dt) {
+  const e = ember;
+  let scaleX = 1, scaleY = 1;
+  if (e.crunchT > 0) {
+    const ct = e.crunchT / 0.25;
+    const squish = 1 - 0.4 * Math.sin(ct * Math.PI);
+    scaleX = 1 + (1 - squish) * 0.5;
+    scaleY = squish;
+  }
+
+  // SURGE fire trail
+  for (const t of e.trail) {
+    const a = t.life / t.maxLife;
+    ctx.save();
+    ctx.globalAlpha = a * 0.5;
+    const tGrad = ctx.createRadialGradient(t.x, t.y, 0, t.x, t.y, t.r * 0.8);
+    tGrad.addColorStop(0, '#ff9900');
+    tGrad.addColorStop(1, 'transparent');
+    ctx.fillStyle = tGrad; ctx.beginPath(); ctx.arc(t.x, t.y, t.r * 0.8, 0, Math.PI*2); ctx.fill();
+    ctx.restore();
+  }
+
+  ctx.save();
+  ctx.translate(e.x, e.y);
+  ctx.scale(scaleX, scaleY);
+
+  const s = e.size;
+  // Size halo
+  const sizeRatio = Math.min(1, s / 18);
+  const healthy = sizeRatio > 0.5;
+  if (healthy) {
+    const haloFlicker = 0.7 + 0.3 * Math.sin(frame * 0.1);
+    ctx.globalAlpha = haloFlicker * 0.3;
+    const haloGrad = ctx.createRadialGradient(0, 0, s, 0, 0, s * 2.5);
+    haloGrad.addColorStop(0, `hsla(30,100%,60%,0.8)`);
+    haloGrad.addColorStop(1, 'transparent');
+    ctx.fillStyle = haloGrad; ctx.beginPath(); ctx.arc(0, 0, s * 2.5, 0, Math.PI*2); ctx.fill();
+  } else {
+    // danger flicker blue-white
+    const flicker = 0.5 + 0.5 * Math.sin(frame * 0.35);
+    ctx.globalAlpha = flicker * 0.5;
+    const dGrad = ctx.createRadialGradient(0, 0, s * 0.5, 0, 0, s * 2);
+    dGrad.addColorStop(0, '#aaccff');
+    dGrad.addColorStop(1, 'transparent');
+    ctx.fillStyle = dGrad; ctx.beginPath(); ctx.arc(0, 0, s * 2, 0, Math.PI*2); ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+
+  // body
+  let innerColor, outerColor;
+  if (e.snapFlash > 0) { innerColor = '#ffffff'; outerColor = '#ffffaa'; }
+  else if (e.coldFlash > 0) { innerColor = '#aaddff'; outerColor = '#5599ff'; }
+  else if (e.surgeActive) {
+    const beat = 0.5 + 0.5 * Math.sin(frame * 0.3);
+    innerColor = `hsl(${40+beat*20},100%,${80+beat*20}%)`;
+    outerColor = '#ff9900';
+  } else {
+    const h = 20 + sizeRatio * 15;
+    innerColor = `hsl(${h},100%,80%)`;
+    outerColor = `hsl(${h - 10},100%,50%)`;
+  }
+
+  const bodyGrad = ctx.createRadialGradient(0, -s*0.2, 0, 0, 0, s);
+  bodyGrad.addColorStop(0, innerColor);
+  bodyGrad.addColorStop(0.6, outerColor);
+  bodyGrad.addColorStop(1, 'transparent');
+  ctx.fillStyle = bodyGrad;
+  ctx.beginPath(); ctx.arc(0, 0, s, 0, Math.PI*2); ctx.fill();
+
+  // pip counter (5 dots showing surge chain)
+  const pips = Math.min(5, e.surgeChain);
+  for (let p = 0; p < 5; p++) {
+    const ang = (p / 5) * Math.PI * 2 - Math.PI/2;
+    const pr = s + 5;
+    const px = Math.cos(ang) * pr, py = Math.sin(ang) * pr;
+    ctx.beginPath(); ctx.arc(px, py, 2.5, 0, Math.PI*2);
+    if (p < pips) {
+      ctx.fillStyle = '#ffdd00'; ctx.shadowColor = '#ff8800'; ctx.shadowBlur = 6;
+    } else {
+      ctx.fillStyle = 'rgba(255,255,255,0.2)'; ctx.shadowBlur = 0;
+    }
+    ctx.fill(); ctx.shadowBlur = 0;
+  }
+
+  ctx.restore();
+
+  // chromatic aberration
+  if (e.chromaTime > 0) {
+    const strength = (e.chromaTime / 0.2) * 3;
+    ctx.save();
+    ctx.globalAlpha = 0.4;
+    ctx.globalCompositeOperation = 'screen';
+    // red channel offset
+    const tempCanvas = document.createElement('canvas');
+    // Use simple color shifts instead
+    ctx.fillStyle = `rgba(255,0,0,0.15)`;
+    ctx.beginPath(); ctx.arc(e.x - strength, e.y, e.size, 0, Math.PI*2); ctx.fill();
+    ctx.fillStyle = `rgba(0,0,255,0.15)`;
+    ctx.beginPath(); ctx.arc(e.x + strength, e.y, e.size, 0, Math.PI*2); ctx.fill();
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.globalAlpha = 1;
+    ctx.restore();
+  }
+}
+
+// ─── Draw Particles ────────────────────────────────────────────────────────
+function drawParticles() {
+  for (const p of particles) {
+    const a = p.life / p.maxLife;
+    ctx.save();
+    ctx.globalAlpha = a;
+    if (p.type === 'ring') {
+      const t = 1 - a;
+      const ringR = p.r + t * (p.maxR - p.r);
+      ctx.strokeStyle = `hsl(${p.hue},100%,65%)`;
+      ctx.lineWidth = 2 * a;
+      ctx.beginPath(); ctx.arc(p.x, p.y, ringR, 0, Math.PI*2); ctx.stroke();
+    } else if (p.type === 'ash') {
+      ctx.fillStyle = `hsl(0,0%,${50 + a*30}%)`;
+      ctx.beginPath(); ctx.arc(p.x, p.y, p.r * a, 0, Math.PI*2); ctx.fill();
+    } else {
+      const grad = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, p.r);
+      if (p.type === 'fire') {
+        grad.addColorStop(0, `hsl(${p.hue+20},100%,90%)`);
+        grad.addColorStop(1, `hsla(${p.hue},100%,50%,0)`);
+      } else {
+        grad.addColorStop(0, `hsl(${p.hue},100%,70%)`);
+        grad.addColorStop(1, `hsla(${p.hue},100%,40%,0)`);
+      }
+      ctx.fillStyle = grad;
+      ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, Math.PI*2); ctx.fill();
+    }
+    ctx.restore();
+  }
+}
+
+// ─── Draw Gates ────────────────────────────────────────────────────────────
+function drawGates() {
+  for (const g of lavaGates) {
+    if (g.smashTimer > 0) continue; // already smashed, don't draw
+    const topH = g.gapCenter - g.gapH / 2;
+    const botStart = g.gapCenter + g.gapH / 2;
+    const botH = H - botStart;
+    const alpha = g.smashing ? 0.3 : 1;
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    // lava gate gradient
+    const gateGrad = ctx.createLinearGradient(g.x, 0, g.x + 8, 0);
+    gateGrad.addColorStop(0, '#ff6600'); gateGrad.addColorStop(0.5, '#ffaa00'); gateGrad.addColorStop(1, '#ff3300');
+    ctx.fillStyle = gateGrad;
+    ctx.fillRect(g.x, 0, 8, topH);
+    ctx.fillRect(g.x, botStart, 8, botH);
+    // glow
+    ctx.shadowColor = '#ff6600'; ctx.shadowBlur = 12;
+    ctx.fillRect(g.x, 0, 8, topH);
+    ctx.fillRect(g.x, botStart, 8, botH);
+    ctx.shadowBlur = 0;
+    ctx.restore();
+  }
+}
+
+// ─── Draw HUD ──────────────────────────────────────────────────────────────
+function drawHUD() {
+  // Score
+  ctx.save();
+  ctx.textAlign = 'center';
+  const mult = getMultiplier();
+  ctx.font = 'bold 28px system-ui';
+  ctx.fillStyle = '#ffffff';
+  ctx.shadowColor = 'rgba(255,100,0,0.8)'; ctx.shadowBlur = 10;
+  ctx.fillText(score, W / 2, 40);
+  ctx.shadowBlur = 0;
+
+  if (mult > 1) {
+    ctx.font = 'bold 14px system-ui';
+    ctx.fillStyle = mult >= 5 ? '#ff3300' : '#ffaa00';
+    ctx.fillText(`×${mult}`, W / 2 + 30, 38);
+  }
+
+  // SURGE indicator
+  if (ember.surgeActive) {
+    const beat = 0.5 + 0.5 * Math.sin(frame * 0.25);
+    ctx.globalAlpha = 0.7 + beat * 0.3;
+    ctx.font = 'bold 13px system-ui';
+    ctx.fillStyle = '#ffffff';
+    const remaining = Math.ceil(ember.surgeTimer * 10) / 10;
+    ctx.fillText(`⚡ SURGE ${remaining.toFixed(1)}s`, W / 2, 60);
+    ctx.globalAlpha = 1;
+  }
+
+  // Best score (small)
+  ctx.font = '11px system-ui';
+  ctx.fillStyle = 'rgba(255,255,255,0.4)';
+  ctx.textAlign = 'right';
+  ctx.fillText(`BEST ${bestScore}`, W - 10, 20);
+  ctx.restore();
+
+  // Banner
+  if (bannerLife > 0) {
+    const a = Math.min(1, bannerLife / 0.3) * Math.min(1, (bannerLife) / 0.5);
+    ctx.save();
+    ctx.globalAlpha = a;
+    ctx.textAlign = 'center';
+    ctx.font = 'bold 20px system-ui';
+    ctx.fillStyle = bannerColor;
+    ctx.shadowColor = bannerColor; ctx.shadowBlur = 20;
+    ctx.fillText(bannerText, W / 2, H / 2 - 60);
+    ctx.shadowBlur = 0;
+    ctx.restore();
+  }
+
+  // Float texts
+  for (const t of floatTexts) {
+    const a = Math.min(1, t.life / t.maxLife * 2);
+    ctx.save();
+    ctx.globalAlpha = a;
+    ctx.textAlign = 'center';
+    ctx.font = `bold ${t.size || 14}px system-ui`;
+    ctx.fillStyle = t.color || '#ffffff';
+    ctx.shadowColor = t.color; ctx.shadowBlur = 8;
+    ctx.fillText(t.text, t.x, t.y);
+    ctx.shadowBlur = 0;
+    ctx.restore();
+  }
+}
+
+// ─── Display Score (animated) ─────────────────────────────────────────────
+let displayScore = 0, scoreAnimTarget = 0;
+
+// ─── Draw Start Screen ─────────────────────────────────────────────────────
+function drawStartScreen() {
+  ctx.save();
+  ctx.textAlign = 'center';
+
+  // Title
+  ctx.font = 'bold 42px system-ui';
+  const titleGrad = ctx.createLinearGradient(W/2 - 100, H/2 - 80, W/2 + 100, H/2 - 30);
+  titleGrad.addColorStop(0, '#ff9900'); titleGrad.addColorStop(1, '#ff3300');
+  ctx.fillStyle = titleGrad;
+  ctx.shadowColor = '#ff6600'; ctx.shadowBlur = 20;
+  ctx.fillText('EMBER CHAIN', W/2, H/2 - 60);
+  ctx.shadowBlur = 0;
+
+  ctx.font = '16px system-ui';
+  ctx.fillStyle = 'rgba(255,180,80,0.8)';
+  ctx.fillText('Snap. Chain. Surge.', W/2, H/2 - 28);
+
+  // Challenge
+  if (challengeScore > 0) {
+    ctx.font = 'bold 15px system-ui';
+    ctx.fillStyle = '#ffdd00';
+    ctx.shadowColor = '#ffaa00'; ctx.shadowBlur = 8;
+    ctx.fillText(`Beat ${challengeScore}'s record!`, W/2, H/2 + 10);
+    ctx.shadowBlur = 0;
+  }
+
+  // Instructions
+  ctx.font = '13px system-ui';
+  ctx.fillStyle = 'rgba(255,200,100,0.6)';
+  ctx.fillText('Tap hot vents (white glow) to absorb', W/2, H/2 + 40);
+  ctx.fillText('Chain 5 = SURGE MODE  •  Avoid cold vents', W/2, H/2 + 58);
+
+  // Tap to start pulse
+  const pulse = 0.5 + 0.5 * Math.sin(frame * 0.08);
+  ctx.globalAlpha = 0.7 + pulse * 0.3;
+  ctx.font = 'bold 18px system-ui';
+  ctx.fillStyle = '#ffffff';
+  ctx.shadowColor = '#ff6600'; ctx.shadowBlur = 12;
+  ctx.fillText('TAP TO START', W/2, H/2 + 100);
+  ctx.shadowBlur = 0;
+  ctx.globalAlpha = 1;
+
+  if (bestScore > 0) {
+    ctx.font = '12px system-ui';
+    ctx.fillStyle = 'rgba(255,255,255,0.35)';
+    ctx.fillText(`Your best: ${bestScore}`, W/2, H/2 + 125);
+  }
+  ctx.restore();
+}
+
+// ─── Draw Game Over ────────────────────────────────────────────────────────
+function drawGameOver() {
+  // Darken
+  ctx.save();
+  ctx.fillStyle = 'rgba(0,0,0,0.55)';
+  ctx.fillRect(0, 0, W, H);
+
+  ctx.textAlign = 'center';
+
+  // Animated score
+  if (displayScore < scoreAnimTarget) {
+    displayScore = Math.min(scoreAnimTarget, displayScore + Math.max(1, (scoreAnimTarget - displayScore) * 0.08));
+  }
+
+  ctx.font = 'bold 54px system-ui';
+  const sGrad = ctx.createLinearGradient(W/2-80, H/2-110, W/2+80, H/2-50);
+  sGrad.addColorStop(0, '#ffcc00'); sGrad.addColorStop(1, '#ff6600');
+  ctx.fillStyle = sGrad;
+  ctx.shadowColor = '#ff6600'; ctx.shadowBlur = 20;
+  ctx.fillText(Math.round(displayScore), W/2, H/2 - 70);
+  ctx.shadowBlur = 0;
+
+  // Best / delta
+  const delta = score - bestScore;
+  ctx.font = 'bold 14px system-ui';
+  if (delta >= 0) {
+    ctx.fillStyle = '#ffdd00';
+    ctx.fillText(delta === 0 ? '— MATCHED BEST —' : `+${delta} from best!`, W/2, H/2 - 38);
+  } else {
+    ctx.fillStyle = 'rgba(255,150,100,0.7)';
+    const gap = -delta;
+    const msg = gap <= 3 ? 'SO CLOSE!' : `${gap} from your best`;
+    ctx.fillText(msg, W/2, H/2 - 38);
+  }
+
+  // SURGE teaser
+  if (!ember.surgeActive && ember.surgeChain < 5) {
+    const snapsNeeded = 5 - ember.surgeChain;
+    ctx.font = '12px system-ui';
+    ctx.fillStyle = 'rgba(255,180,80,0.6)';
+    ctx.fillText(`You were ${snapsNeeded} snap${snapsNeeded > 1?'s':''} from SURGE MODE`, W/2, H/2 - 18);
+  }
+
+  // Share button
+  ctx.fillStyle = 'rgba(255,100,0,0.2)';
+  ctx.strokeStyle = 'rgba(255,100,0,0.6)';
+  ctx.lineWidth = 1.5;
+  roundRect(W/2 - 80, H/2 + 5, 160, 36, 8);
+  ctx.fill(); ctx.stroke();
+  ctx.font = 'bold 14px system-ui';
+  ctx.fillStyle = '#ffaa44';
+  ctx.fillText('Share Score', W/2, H/2 + 28);
+
+  // Tap to retry pulse
+  const pulse = 0.5 + 0.5 * Math.sin(frame * 0.1);
+  ctx.globalAlpha = 0.7 + pulse * 0.3;
+  ctx.font = 'bold 17px system-ui';
+  ctx.fillStyle = '#ffffff';
+  ctx.shadowColor = '#ff6600'; ctx.shadowBlur = 10;
+  ctx.fillText('TAP TO RETRY', W/2, H/2 + 72);
+  ctx.shadowBlur = 0;
+  ctx.globalAlpha = 1;
+
+  // Auto-retry countdown
+  if (autoRetryTimer > 0) {
+    ctx.font = '11px system-ui';
+    ctx.fillStyle = 'rgba(255,255,255,0.3)';
+    ctx.fillText(`Auto-retry in ${Math.ceil(autoRetryTimer)}s`, W/2, H/2 + 92);
+  }
+
+  ctx.restore();
+}
+
+function roundRect(x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x+r, y); ctx.lineTo(x+w-r, y);
+  ctx.quadraticCurveTo(x+w, y, x+w, y+r);
+  ctx.lineTo(x+w, y+h-r); ctx.quadraticCurveTo(x+w, y+h, x+w-r, y+h);
+  ctx.lineTo(x+r, y+h); ctx.quadraticCurveTo(x, y+h, x, y+h-r);
+  ctx.lineTo(x, y+r); ctx.quadraticCurveTo(x, y, x+r, y);
+  ctx.closePath();
+}
+
+// Share button tap detection
+canvas.addEventListener('pointerdown', e => {
+  if (state !== 'gameover') return;
+  const rect = canvas.getBoundingClientRect();
+  const scaleX = W / rect.width, scaleY = H / rect.height;
+  const cx = (e.clientX - rect.left) * scaleX;
+  const cy = (e.clientY - rect.top) * scaleY;
+  if (cx > W/2 - 80 && cx < W/2 + 80 && cy > H/2 + 5 && cy < H/2 + 41) {
+    shareScore();
+  }
+});
+
+function shareScore() {
+  const url = location.href.split('?')[0];
+  const text = `🔥 I scored ${score} in Ember Chain! Can you beat my Surge chain? ${url}?challenge=${score}`;
+  if (navigator.share) {
+    navigator.share({ title: 'Ember Chain', text, url: `${url}?challenge=${score}` }).catch(() => {});
+  } else {
+    navigator.clipboard.writeText(text).then(() => {
+      floatTexts.push({ x: W/2, y: H/2 - 20, text: 'Copied!', life: 1.5, maxLife: 1.5, color: '#44ff88', size: 14 });
+    }).catch(() => {});
+  }
+}
+
+// ─── Main Loop ─────────────────────────────────────────────────────────────
+let lastTime = 0;
+
+function loop(ts) {
+  const dt = Math.min(0.05, (ts - lastTime) / 1000);
+  lastTime = ts;
+  frame++;
+
+  updateShake(dt);
+  if (bannerLife > 0) bannerLife -= dt;
+
+  ctx.save();
+  ctx.translate(shakeX, shakeY);
+
+  const diff = getDiff(score);
+  drawBackground(dt);
+
+  if (state === 'playing') {
+    ember.update(dt, diff);
+    updateVents(dt, diff);
+    updateGates(dt, diff);
+    updateParticles(dt);
+    updateFloatTexts(dt);
+    checkGates();
+
+    // draw order
+    drawGates();
+    for (const v of vents) drawVent(v);
+    drawParticles();
+    drawEmber(dt);
+    drawHUD();
+
+    // death check: size too small
+    if (ember.size <= 5) triggerDeath();
+  } else if (state === 'start') {
+    // idle ember animation
+    ember.x = 80 + Math.sin(frame * 0.03) * 20;
+    ember.y = H/2 + Math.sin(frame * 0.022) * 30;
+    ember.size = 18 + Math.sin(frame * 0.05) * 3;
+    updateParticles(dt);
+    drawParticles();
+    drawEmber(dt);
+    drawStartScreen();
+  } else if (state === 'gameover') {
+    updateParticles(dt);
+    updateFloatTexts(dt);
+    for (const v of vents) drawVent(v);
+    drawParticles();
+    drawFloatTexts();
+    drawGameOver();
+
+    autoRetryTimer -= dt;
+    if (autoRetryTimer <= 0) startGame();
+  }
+
+  ctx.restore();
+  requestAnimationFrame(loop);
+}
+
+function drawFloatTexts() {
+  for (const t of floatTexts) {
+    const a = Math.min(1, t.life / t.maxLife * 2);
+    ctx.save();
+    ctx.globalAlpha = a;
+    ctx.textAlign = 'center';
+    ctx.font = `bold ${t.size || 14}px system-ui`;
+    ctx.fillStyle = t.color || '#ffffff';
+    ctx.shadowColor = t.color; ctx.shadowBlur = 8;
+    ctx.fillText(t.text, t.x, t.y);
+    ctx.shadowBlur = 0;
+    ctx.restore();
+  }
+}
+
+ember.init();
+requestAnimationFrame(ts => { lastTime = ts; requestAnimationFrame(loop); });
+
+})();
+</script>
+</body>
+</html>
