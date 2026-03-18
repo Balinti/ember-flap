@@ -505,7 +505,7 @@ function spawnDaughter(parent) {
   const diff = getDiff(score);
   return {
     x: parent.x + (Math.random() - 0.5) * 30,
-    y: parent.y + (d => d ? -25 : 25)(Math.random() < 0.5),
+    y: parent.y + (Math.random() < 0.5 ? -25 : 25),
     baseY: parent.y,
     arcAmt: (Math.random() - 0.5) * 40,
     cold: false,
